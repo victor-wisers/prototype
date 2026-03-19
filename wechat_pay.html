@@ -1,0 +1,244 @@
+<style>
+@keyframes slideIn{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:translateX(0)}}
+button{padding:6px 18px;font-size:12px;border:0.5px solid var(--color-border-secondary);border-radius:8px;background:transparent;color:var(--color-text-primary);cursor:pointer;transition:background 0.15s,opacity 0.15s}
+button:hover{background:var(--color-background-secondary)}
+button:disabled{opacity:0.28;cursor:default}
+#log-wrap{max-height:120px;overflow-y:auto;display:flex;flex-direction:column;gap:3px;margin-top:10px}
+.log-row{display:flex;align-items:center;gap:8px;padding:4px 10px;border-radius:6px;background:var(--color-background-secondary);font-size:12px;animation:slideIn 0.2s ease}
+</style>
+
+<div style="padding:0.75rem 0">
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+  <button id="bPlay">Play</button>
+  <button id="bStep">Step</button>
+  <button id="bReset">Reset</button>
+  <span id="sCtr" style="font-size:12px;color:var(--color-text-secondary);margin-left:6px">Step 0 / 14</span>
+  <span id="sBadge" style="display:none;margin-left:auto;font-size:11px;font-weight:500;padding:3px 10px;border-radius:12px;background:var(--color-background-success);color:var(--color-text-success)">Payment success 支付成功</span>
+</div>
+
+<div id="sDesc" style="padding:8px 12px;border-radius:8px;border:0.5px solid var(--color-border-tertiary);background:var(--color-background-secondary);min-height:46px;margin-bottom:10px">
+  <p id="dEn" style="font-size:13px;font-weight:500;color:var(--color-text-primary);margin:0">Press Play or Step to begin</p>
+  <p id="dCn" style="font-size:11px;color:var(--color-text-secondary);margin:2px 0 0">按 Play 或 Step 開始動畫</p>
+</div>
+
+<svg id="stage" width="100%" viewBox="0 0 680 1500"></svg>
+
+<div id="log-wrap"></div>
+</div>
+
+<script>
+const NS='http://www.w3.org/2000/svg';
+function mk(tag,a,p){const e=document.createElementNS(NS,tag);for(const[k,v]of Object.entries(a||{}))e.setAttribute(k,v);if(p)p.appendChild(e);return e}
+
+const ENT=[
+  {id:'user',  en:'User',            cn:'用戶',          x:60,  fill:'#EEEDFE',stroke:'#534AB7',tc:'#26215C',w:96},
+  {id:'front', en:'Wisers Frontend', cn:'前端 Next.js',  x:218, fill:'#EEEDFE',stroke:'#534AB7',tc:'#26215C',w:148},
+  {id:'back',  en:'Wisers Backend',  cn:'後端 API + DB', x:432, fill:'#E1F5EE',stroke:'#0F6E56',tc:'#04342C',w:152},
+  {id:'wx',    en:'WeChat Pay',      cn:'微信支付',       x:606, fill:'#F1EFE8',stroke:'#5F5E5A',tc:'#2C2C2A',w:118},
+];
+
+const STEPS=[
+  {f:'user', t:'front', type:'req',  col:'#7F77DD', en:'1. Click pay',                  cn:'點擊付款'},
+  {f:'front',t:'back',  type:'req',  col:'#378ADD', en:'2. POST /api/pay/create + JWT',  cn:'發送創建訂單請求'},
+  {f:'back', t:'back',  type:'int',  col:'#1D9E75', en:'3. Verify JWT',                  cn:'驗證身份令牌'},
+  {f:'back', t:'wx',    type:'req',  col:'#888780', en:'4. Create native order',          cn:'向微信創建掃碼訂單'},
+  {f:'wx',   t:'back',  type:'res',  col:'#888780', en:'5. Returns code_url',             cn:'返回二維碼鏈接'},
+  {f:'back', t:'back',  type:'int',  col:'#1D9E75', en:'6. Save pending order',           cn:'保存待付訂單至 DB'},
+  {f:'back', t:'front', type:'res',  col:'#378ADD', en:'7. Return code_url',              cn:'回傳二維碼鏈接'},
+  {f:'front',t:'user',  type:'res',  col:'#7F77DD', en:'8. Render QR code',               cn:'顯示二維碼'},
+  {f:'user', t:'wx',    type:'usr',  col:'#5DCAA5', en:'9. Scan QR + confirm pay',        cn:'掃碼並確認支付'},
+  {f:'wx',   t:'back',  type:'hook', col:'#EF9F27', en:'10. Webhook POST notify',         cn:'微信推送支付結果'},
+  {f:'back', t:'back',  type:'sec',  col:'#EF9F27', en:'11. Verify sig + decrypt',        cn:'驗簽並解密回調數據'},
+  {f:'back', t:'back',  type:'int',  col:'#1D9E75', en:'12. Update DB + activate sub',    cn:'更新訂單，激活訂閱'},
+  {f:'front',t:'back',  type:'poll', col:'#378ADD', en:'13. Poll order status',           cn:'前端輪詢訂單狀態'},
+  {f:'wx',   t:'back',  type:'paid', col:'#5DCAA5', en:'14. Status PAID → update UI',     cn:'已付款，刷新頁面'},
+];
+
+const svg=document.getElementById('stage');
+const Y0=24, BH=56, YLS=Y0+BH, YLE=1480;
+const SY0=YLS+60, SG=96;
+
+function ex(id){return ENT.find(e=>e.id===id).x}
+function sy(i){return SY0+i*SG}
+
+let layer={};
+let cur=-1,playing=false,raf=null;
+
+function build(){
+  while(svg.firstChild)svg.removeChild(svg.firstChild);
+  layer.defs=mk('defs',{},svg);
+  ['#7F77DD','#378ADD','#888780','#5DCAA5','#EF9F27','#1D9E75'].forEach(c=>{
+    const id='arr'+c.replace('#','');
+    const m=mk('marker',{id,viewBox:'0 0 10 10',refX:'8',refY:'5',markerWidth:'5',markerHeight:'5',orient:'auto-start-reverse'},layer.defs);
+    mk('path',{d:'M2 1L8 5L2 9',fill:'none',stroke:c,'stroke-width':'1.5','stroke-linecap':'round','stroke-linejoin':'round'},m);
+  });
+  layer.ents=mk('g',{},svg);
+  layer.lines=mk('g',{},svg);
+  layer.steps=mk('g',{},svg);
+  layer.pkts=mk('g',{},svg);
+
+  ENT.forEach(e=>{
+    const bx=e.x-e.w/2;
+    const g=mk('g',{id:'ent-'+e.id},layer.ents);
+    mk('rect',{x:bx,y:Y0,width:e.w,height:BH,rx:'6',fill:e.fill,stroke:e.stroke,'stroke-width':'0.8'},g);
+    const t=mk('text',{x:e.x,y:Y0+18,'text-anchor':'middle','dominant-baseline':'central',fill:e.tc,'font-size':'13','font-weight':'500'},g);
+    t.textContent=e.en;
+    const s=mk('text',{x:e.x,y:Y0+38,'text-anchor':'middle','dominant-baseline':'central',fill:e.stroke,'font-size':'12','font-weight':'500'},g);
+    s.textContent=e.cn;
+    mk('line',{x1:e.x,y1:YLS,x2:e.x,y2:YLE,stroke:'var(--color-border-secondary)','stroke-width':'0.5','stroke-dasharray':'5 4'},layer.lines);
+  });
+}
+
+function mker(col){return'url(#arr'+col.replace('#','')+')';}
+
+function drawArrow(i){
+  const s=STEPS[i], y=sy(i), c=s.col;
+  const x1=ex(s.f), x2=ex(s.t);
+  const g=mk('g',{'data-i':i,opacity:'0'},layer.steps);
+
+  if(s.type==='int'||s.type==='sec'){
+    const bw=168, bh=40;
+    const bf=s.type==='sec'?'#FFF3DC':'#D8F5EA';
+    mk('rect',{x:x1-bw/2,y:y-bh/2,width:bw,height:bh,rx:'6',fill:bf,stroke:c,'stroke-width':'0.8'},g);
+    const t=mk('text',{x:x1,y:y-7,'text-anchor':'middle','dominant-baseline':'central',fill:c,'font-size':'13','font-weight':'600'},g);
+    t.textContent=s.en;
+    const tc=mk('text',{x:x1,y:y+13,'text-anchor':'middle','dominant-baseline':'central',fill:c,'font-size':'12','font-weight':'500'},g);
+    tc.textContent=s.cn;
+  } else {
+    const goLeft=x2<x1;
+    const lx1=goLeft?x1-2:x1+2, lx2=goLeft?x2+10:x2-10;
+    const dash=s.type==='res'||s.type==='poll'?'6 3':'none';
+    const sw=s.type==='hook'||s.type==='usr'?'2':'1.2';
+    mk('line',{x1:lx1,y1:y,x2:lx2,y2:y,stroke:c,'stroke-width':sw,'stroke-dasharray':dash,'marker-end':mker(c)},g);
+    const mx=(x1+x2)/2;
+    const t=mk('text',{x:mx,y:y-14,'text-anchor':'middle','dominant-baseline':'central',fill:c,'font-size':'13','font-weight':s.type==='hook'||s.type==='usr'||s.type==='paid'?'600':'500'},g);
+    t.textContent=s.en;
+    const tc=mk('text',{x:mx,y:y+12,'text-anchor':'middle','dominant-baseline':'central',fill:c,'font-size':'12','font-weight':'500'},g);
+    tc.textContent=s.cn;
+  }
+  requestAnimationFrame(()=>{g.setAttribute('opacity','1')});
+  return g;
+}
+
+function flashEnt(id,col){
+  const g=document.getElementById('ent-'+id);
+  if(!g)return;
+  const r=g.querySelector('rect');
+  const e=ENT.find(x=>x.id===id);
+  if(!r||!e)return;
+  r.style.transition='none';
+  r.setAttribute('fill',col+'44');
+  r.setAttribute('stroke',col);
+  r.setAttribute('stroke-width','2');
+  setTimeout(()=>{
+    r.style.transition='fill 0.5s,stroke 0.4s,stroke-width 0.4s';
+    r.setAttribute('fill',e.fill);
+    r.setAttribute('stroke',e.stroke);
+    r.setAttribute('stroke-width','0.8');
+  },260);
+}
+
+function animPkt(i,done){
+  const s=STEPS[i];
+  if(s.type==='int'||s.type==='sec'){
+    const el=layer.steps.querySelector(`[data-i="${i}"]`);
+    if(el){
+      const r=el.querySelector('rect');
+      if(r){
+        const orig=r.getAttribute('fill');
+        r.style.transition='none';
+        r.setAttribute('fill',s.col+'88');
+        setTimeout(()=>{r.style.transition='fill 0.4s';r.setAttribute('fill',orig)},300);
+      }
+    }
+    setTimeout(done,650);
+    return;
+  }
+  const y=sy(i), x1=ex(s.f), x2=ex(s.t);
+  const c=mk('circle',{cx:x1,cy:y,r:'7',fill:s.col},layer.pkts);
+  const trail=mk('circle',{cx:x1,cy:y,r:'4',fill:s.col,opacity:'0.35'},layer.pkts);
+  const dur=s.type==='usr'?900:650;
+  const t0=performance.now();
+  function tick(now){
+    const p=Math.min((now-t0)/dur,1);
+    const e=p<0.5?2*p*p:-1+(4-2*p)*p;
+    const cx=x1+(x2-x1)*e;
+    c.setAttribute('cx',cx);
+    trail.setAttribute('cx',cx-(x2>x1?10:-10));
+    if(p<1){raf=requestAnimationFrame(tick);}
+    else{c.remove();trail.remove();flashEnt(s.t,s.col);done();}
+  }
+  raf=requestAnimationFrame(tick);
+}
+
+function addLog(i){
+  const s=STEPS[i];
+  const w=document.getElementById('log-wrap');
+  const d=document.createElement('div');
+  d.className='log-row';
+  const dot=document.createElement('span');
+  dot.style.cssText=`width:7px;height:7px;border-radius:50%;background:${s.col};flex-shrink:0`;
+  const en=document.createElement('span');
+  en.style.cssText='color:var(--color-text-primary);font-size:12px;font-weight:500';
+  en.textContent=s.en;
+  const cn=document.createElement('span');
+  cn.style.cssText=`margin-left:auto;color:${s.col};font-size:11px;font-weight:500;padding-left:12px;white-space:nowrap`;
+  cn.textContent=s.cn;
+  d.appendChild(dot);d.appendChild(en);d.appendChild(cn);
+  w.appendChild(d);
+  w.scrollTop=w.scrollHeight;
+}
+
+function setDesc(i){
+  if(i<0){
+    document.getElementById('dEn').textContent='Press Play or Step to begin';
+    document.getElementById('dCn').textContent='按 Play 或 Step 開始動畫';
+    document.getElementById('sCtr').textContent='Step 0 / 14';
+    return;
+  }
+  const s=STEPS[i];
+  const typeLabel={req:'→ Request 請求',res:'← Response 回應',int:'⚙ Internal 內部處理',sec:'⚙ Security 安全驗證',usr:'User action 用戶操作',hook:'Webhook 回調',poll:'→ Polling 輪詢',paid:'← Result 結果'};
+  document.getElementById('dEn').textContent=s.en;
+  document.getElementById('dCn').textContent=s.cn+' — '+(typeLabel[s.type]||s.type);
+  document.getElementById('sCtr').textContent=`Step ${i+1} / 14`;
+}
+
+function doStep(i,auto){
+  if(i>=STEPS.length){
+    playing=false;
+    document.getElementById('bPlay').textContent='Play';
+    document.getElementById('bStep').disabled=false;
+    document.getElementById('sBadge').style.display='inline';
+    return;
+  }
+  setDesc(i);
+  drawArrow(i);
+  document.getElementById('bStep').disabled=true;
+  animPkt(i,()=>{
+    addLog(i);
+    cur=i;
+    document.getElementById('bStep').disabled=false;
+    if(auto&&playing)setTimeout(()=>{if(playing)doStep(i+1,true)},420);
+  });
+}
+
+function reset(){
+  playing=false;cur=-1;
+  if(raf)cancelAnimationFrame(raf);
+  document.getElementById('bPlay').textContent='Play';
+  document.getElementById('bStep').disabled=false;
+  document.getElementById('log-wrap').innerHTML='';
+  document.getElementById('sBadge').style.display='none';
+  setDesc(-1);
+  build();
+}
+
+document.getElementById('bPlay').addEventListener('click',()=>{
+  if(playing){playing=false;document.getElementById('bPlay').textContent='Play';}
+  else{playing=true;document.getElementById('bPlay').textContent='Pause';doStep(cur+1,true);}
+});
+document.getElementById('bStep').addEventListener('click',()=>{if(!playing)doStep(cur+1,false);});
+document.getElementById('bReset').addEventListener('click',reset);
+
+build();
+</script>
